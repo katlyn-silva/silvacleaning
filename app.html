@@ -156,6 +156,15 @@ main{flex:1;padding:18px 14px 40px}
 }
 .daylabel:first-child{margin-top:0}
 .daylabel.today{color:var(--blue)}
+.weekday{display:flex;align-items:baseline;justify-content:space-between;gap:10px;
+  margin:18px 2px 8px;font-weight:700;font-size:.95rem}
+.weekday:first-child{margin-top:4px}
+.weekday.today{color:var(--blue)}
+.weekday .sum{font-weight:600;font-size:.8rem;color:var(--muted)}
+.weekfree{padding:10px 14px;border:1px dashed var(--border);border-radius:var(--radius-sm);
+  color:var(--muted);font-size:.86rem}
+.notyet{padding:12px 14px;border-radius:var(--radius-sm);background:var(--blue-pale);
+  color:var(--navy);font-size:.9rem;margin-top:6px}
 
 .empty{text-align:center;padding:46px 20px;color:var(--muted)}
 .empty .big{font-size:2.2rem;margin-bottom:10px}
@@ -379,6 +388,7 @@ textarea{resize:vertical;min-height:74px}
 
   <nav class="tabs" id="tabs" role="tablist">
     <button role="tab" data-tab="today"    aria-selected="true">Today</button>
+    <button role="tab" data-tab="week"     aria-selected="false" class="cln hidden">My week</button>
     <button role="tab" data-tab="all"      aria-selected="false" class="mgr hidden">Full schedule</button>
     <button role="tab" data-tab="newjob"   aria-selected="false" class="mgr hidden">New job</button>
     <button role="tab" data-tab="summary"  aria-selected="false" class="mgr hidden">This week</button>
@@ -394,6 +404,7 @@ textarea{resize:vertical;min-height:74px}
     <div id="newBanner"></div>
     <div id="globalMsg"></div>
     <section id="panel-today"   class="panel stack"></section>
+    <section id="panel-week"    class="panel stack hidden"></section>
     <section id="panel-all"     class="panel stack hidden"></section>
 
     <!-- New job -->
@@ -855,6 +866,7 @@ async function start(session) {
   $('#userName').textContent = profile.full_name || session.user.email;
   $('#userInitials').textContent = initials(profile.full_name || session.user.email);
   $$('.mgr').forEach(el => el.classList.toggle('hidden', !isManager));
+  $$('.cln').forEach(el => el.classList.toggle('hidden', isManager));
 
   if (isManager) { await loadTeam(); await loadClients(); await loadRequests(); await loadReviews(); }
   await tryLoad('new jobs', loadNewAssignments, null);
@@ -883,6 +895,7 @@ function selectTab(tab) {
   $$('#tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   $$('main > .panel').forEach(p => p.classList.toggle('hidden', p.id !== 'panel-' + tab));
   if (tab === 'today')   renderToday();
+  if (tab === 'week')    renderWeek();
   if (tab === 'all')     renderJobs('#panel-all',   addDays(today(), -14), addDays(today(), 60));
   if (tab === 'newjob')  prepareJobForm();
   if (tab === 'summary')  renderSummary();
@@ -1018,6 +1031,7 @@ async function renderJobs(sel, from, to) {
 const OUTBOX_KEY  = 'silva.outbox.v1';
 const REFUSED_KEY = 'silva.refused.v1';
 const DAY_KEY     = 'silva.today.v1';
+const WEEK_KEY    = 'silva.week.v1';
 
 const readStore = (k, fallback) => {
   try { return JSON.parse(localStorage.getItem(k)) ?? fallback; } catch { return fallback; }
@@ -1218,6 +1232,73 @@ async function renderToday() {
   todayJobs = applyOutbox(todayJobs);
   renderOfflineBanner();
   paintToday();
+}
+
+/* ---------------- my week ----------------
+   Today is for the door; this is for the evening before. Seven days from today,
+   every day shown even when it is empty, so a free Wednesday reads as free and
+   not as "did it load?". Read-only for the days ahead: signing in, payment and
+   photos only open on the day itself (see renderActions). */
+
+let weekJobs = [];
+let weekStamp = null;    // set when the week is being shown from the phone's copy
+
+async function renderWeek() {
+  const box = $('#panel-week');
+  const from = today(), to = addDays(today(), 6);
+  box.innerHTML = '<div class="empty"><p>Loading…</p></div>';
+  try {
+    weekJobs = await fetchJobs(from, to);
+    weekStamp = null;
+    writeStore(WEEK_KEY, { at: new Date().toISOString(), from, jobs: weekJobs });
+  } catch (err) {
+    const saved = readStore(WEEK_KEY, null);
+    if (offlineish(err) && saved && saved.jobs) {
+      // An older copy still helps; just drop the days that have already gone.
+      weekJobs = saved.jobs.filter(j => j.scheduled_date >= from);
+      weekStamp = saved.at;
+    } else {
+      box.innerHTML = `<div class="empty"><div class="big">📡</div>
+        <p>${esc(offlineish(err)
+          ? 'No signal, and the week has not been saved on this phone yet. Open it once in coverage and it will be here next time.'
+          : (err.message || 'The week would not load.'))}</p></div>`;
+      return;
+    }
+  }
+  weekJobs = applyOutbox(weekJobs).filter(j => j.status !== 'cancelled');
+
+  const byDay = {};
+  weekJobs.forEach(j => (byDay[j.scheduled_date] ||= []).push(j));
+
+  const days = [];
+  for (let i = 0; i < 7; i++) days.push(addDays(from, i));
+
+  const total = weekJobs.length;
+  const mins  = weekJobs.reduce((n, j) => n + (j.duration_minutes || 0), 0);
+
+  box.innerHTML = `
+    ${weekStamp ? `<div class="waitbanner grey"><div class="grow"><strong>No signal</strong>
+      <div class="sub">Showing the week as it was saved at ${esc(clockTime(weekStamp))}.</div></div></div>` : ''}
+    <div class="weektotal" style="color:var(--muted);font-size:.88rem;margin:2px 2px 4px">
+      ${total ? `${total} house${total === 1 ? '' : 's'} in the next 7 days · ${esc(prettyDur(mins))} of work`
+              : 'Nothing booked for you in the next 7 days yet.'}
+    </div>
+    ${days.map(d => {
+      const list = byDay[d] || [];
+      const m = list.reduce((n, j) => n + (j.duration_minutes || 0), 0);
+      return `
+        <div class="weekday${d === from ? ' today' : ''}" data-day="${d}">
+          <span>${esc(prettyDate(d))}</span>
+          <span class="sum">${list.length
+            ? `${list.length} house${list.length === 1 ? '' : 's'} · ${esc(prettyDur(m))}`
+            : ''}</span>
+        </div>
+        ${list.length ? list.map(jobCard).join('') : '<div class="weekfree">Free</div>'}`;
+    }).join('')}`;
+
+  $$('.job', box).forEach(el => {
+    el.onclick = () => openJob(weekJobs.find(j => j.id === el.dataset.id));
+  });
 }
 
 const isOpenJob = j => j.status !== 'completed' && j.status !== 'cancelled';
@@ -1603,6 +1684,17 @@ function renderActions(j) {
   const done = j.status === 'completed';
   const cancelled = j.status === 'cancelled';
   let html = '';
+
+  // A visit later in the week: she can read it, but there is nothing to do yet.
+  // Managers keep every control, because they are the ones who plan ahead.
+  const ahead = j.scheduled_date > today();
+  if (ahead && !isManager && !done && !cancelled) {
+    const when = j.scheduled_date === addDays(today(), 1)
+      ? 'tomorrow' : 'on ' + prettyDate(j.scheduled_date);
+    box.innerHTML = `<div class="notyet">This visit is ${esc(when)}.
+      Signing in, payment and photos open on the day.</div>` + seriesBlock(j);
+    return;
+  }
 
   if (!done && !cancelled) {
     html += signInBlock(j);
